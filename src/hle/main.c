@@ -24,6 +24,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <SDL2/SDL.h>
 
 #include "win32hle.h"
@@ -36,6 +37,7 @@
 #endif
 
 extern const uint32_t hotd_entry_va;              /* recomp_dispatch.c */
+extern const uint32_t hotd_exe_stamp;             /* recomp_dispatch.c: the build the lift is of */
 extern const uint32_t hotd_setjmp_resume[][2];    /* recomp_dispatch.c: (function VA, resume VA) */
 extern const uint32_t recomp_dispatch_count;
 extern int win32hle_trace;
@@ -61,6 +63,7 @@ void recomp_not_lifted(uint32_t va) {
  * with eax the jmp_buf and edx the value. Watcom's buffer: ebx ecx edx esi
  * edi ebp at 0..0x14, the return address at 0x18 (a lifted call pushes a
  * dummy, so the landing pad's own address is used), esp at 0x1C. */
+static unsigned g_longjmps;
 void hotd_longjmp(void) {
     uint32_t jb = g_eax, val = g_edx ? g_edx : 1;
     uint32_t esp = MEM32(jb + 0x1C);
@@ -68,6 +71,10 @@ void hotd_longjmp(void) {
     uint32_t resume = 0;
     for (int i = 0; f && hotd_setjmp_resume[i][0]; i++)
         if (hotd_setjmp_resume[i][0] == f->func) resume = hotd_setjmp_resume[i][1];
+    g_longjmps++;
+    if (g_longjmps <= 8 || (g_longjmps & 0x3FF) == 0)
+        fprintf(stderr, "[longjmp] #%u buf %08X val %u esp %08X -> frame %s func %08X resume %08X\n", g_longjmps, jb, val, esp,
+                f ? "found" : "NONE", f ? f->func : 0, resume);
     if (!resume) {
         fprintf(stderr, "[longjmp] buffer 0x%08X (esp 0x%08X): no lifted setjmp caller owns it\n", jb, esp);
         hle_exit(3);
@@ -144,9 +151,25 @@ static int step_arg(const char *spec) {
 /* The last frame shown, for --at S:shot:FILE (a PPM) */
 static uint8_t *g_shot;
 static int g_shot_w, g_shot_h;
+static int g_frametrace;
 static void on_frame(const uint8_t *px, int w, int h, int pitch, int bpp) {
     const uint8_t *fpx; const uint32_t *pal; int fw, fh, fpitch, fbpp;
-    if (!hle_dd_frame(&fpx, &fw, &fh, &fpitch, &fbpp, &pal, NULL)) return;
+    unsigned seq;
+    if (!hle_dd_frame(&fpx, &fw, &fh, &fpitch, &fbpp, &pal, &seq)) return;
+    if (g_frametrace) {                       /* --frametrace: what the primary holds, every 2 s */
+        static uint32_t last;
+        uint32_t now = hle_ticks_ms();
+        if (now - last >= 2000) {
+            last = now;
+            unsigned hist[256] = { 0 }, npal = 0;
+            if (fbpp == 8) for (int y = 0; y < fh; y += 4) for (int x = 0; x < fw; x += 4) hist[fpx[(size_t)y * fpitch + x]]++;
+            if (pal) for (int i = 0; i < 256; i++) if (pal[i] & 0xFFFFFF) npal++;
+            int top = 0; for (int i = 1; i < 256; i++) if (hist[i] > hist[top]) top = i;
+            unsigned distinct = 0; for (int i = 0; i < 256; i++) if (hist[i]) distinct++;
+            fprintf(stderr, "[frame] seq %u %dx%dx%d: %u distinct indices, most %u (%u), palette %s (%u non-black)\n",
+                    seq, fw, fh, fbpp, distinct, top, hist[top], pal ? "set" : "none", npal);
+        }
+    }
     (void)px; (void)pitch; (void)bpp;
     if (g_shot_w != w || g_shot_h != h) { free(g_shot); g_shot = (uint8_t *)malloc((size_t)w * h * 3); g_shot_w = w, g_shot_h = h; }
     if (!g_shot) return;
@@ -195,9 +218,118 @@ static void steps_run(void) {
     }
 }
 
+/* ---- --msgtrace: every message the window procedure sees, and the game's run flags ---- */
+static int g_msgtrace;
+static void msg_hook(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp) {
+    if (msg == 0x0113u || msg == 0x000Fu || msg == 0x0200u || msg == 0x0084u || msg == 0x0020u) return;   /* WM_TIMER, WM_PAINT, WM_MOUSEMOVE, WM_NCHITTEST, WM_SETCURSOR */
+    fprintf(stderr, "[msg] hwnd %08X msg %04X wp %08X lp %08X\n", hwnd, msg, wp, lp);
+}
+static void flags_tick(void) {
+    static uint32_t last;
+    uint32_t now = hle_ticks_ms();
+    if (now - last < 1000) return;
+    last = now;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint32_t tgt = (uint32_t)(ts.tv_sec * 1000u + ts.tv_nsec / 1000000u);
+    fprintf(stderr, "[flags] 0xC64B14=%02X game=%08X fps=%u frame=%u 0xC649F4=%08X mode=%08X\n", MEM8(0xC64B14), MEM32(0xC64B2C),
+            MEM32(0xDA69AC), MEM32(0x5CD308), MEM32(0xC649F4), MEM32(0xC649E0));
+    (void)tgt;
+    {   /* the display object (the mode object at 0xC649E0): entries at +0x70, count at +0x14, viewport +0x20.. */
+        uint32_t o = MEM32(0xC649E0);
+        if (o) {
+            uint32_t n = MEM32(o + 0x14), tab = MEM32(o + 0x70);
+            fprintf(stderr, "[display] obj %08X count %u table %08X vp %d,%d-%d,%d ofs %d,%d flags34 %08X entries:", o, n, tab,
+                    (int)MEM32(o + 0x20), (int)MEM32(o + 0x24), (int)MEM32(o + 0x28), (int)MEM32(o + 0x2C), (int)MEM32(o + 0x48), (int)MEM32(o + 0x4C), MEM32(o + 0x34));
+            for (uint32_t i = 0; tab && i < 6 && i < n; i++) {
+                uint32_t e = MEM32(tab + 4 * i);
+                fprintf(stderr, " [%08X%s%08X]", e, e ? " code " : "", e ? MEM32(e + 8) : 0);
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+    {   /* the buffer the game renders into (its Lock's lpSurface and lPitch) against the primary the presenter shows */
+        uint32_t lp = MEM32(0xC64CDC), pitch = MEM32(0xC65380), surf = MEM32(0xDA8980);
+        const uint8_t *fpx; const uint32_t *pal; int fw, fh, fpitch, fbpp;
+        int have = hle_dd_frame(&fpx, &fw, &fh, &fpitch, &fbpp, &pal, NULL);
+        unsigned hist[256] = { 0 }, distinct = 0;
+        if (lp && pitch && pitch < 4096) {
+            const uint8_t *g = (const uint8_t *)hle_ptr(lp);
+            for (int y = 0; y < 480; y += 4) for (int x = 0; x < 640; x += 4) hist[g[(size_t)y * pitch + x]]++;
+            for (int i = 0; i < 256; i++) if (hist[i]) distinct++;
+        }
+        fprintf(stderr, "[buffers] game lpSurface %08X pitch %u surface obj %08X: %u distinct indices | primary px %08X pitch %d\n",
+                lp, pitch, surf, distinct, have ? hle_va(fpx) : 0, have ? fpitch : 0);
+    }
+}
+
+/* ---- RECOMP_TRACE: every lifted function entry, for a window of the run
+ * (--calltrace-from S [--calltrace-max N]), interleaved with the layer's
+ * traces on stderr, so one frame's render sequence can be read ---------- */
+#ifdef RECOMP_TRACE
+static double g_calltrace_from = -1;
+static unsigned g_calltrace_max = 200000, g_calltrace_n;
+static uint32_t g_trace_t0;
+uint32_t g_enter_trace[RECOMP_ENTER_SIZE];
+uint32_t g_enter_idx;
+/* --listtrace: the display list's allocator (0x0057F3C0: eax the display object, [esp+4] the depth,
+ * [esp+8] the entry code) and the present (0x0057CCE0: eax the object), as they are entered */
+static int g_listtrace;
+static unsigned g_alloc_seen, g_present_seen;
+void recomp_trace_enter(uint32_t va) {
+    if (va == 0x004182E4u) {                 /* the game's own debug printf (compiled out of the retail build): its format at [esp+4], arguments after */
+        static unsigned n;
+        if (n++ < 200) {
+            char buf[512];
+            uint32_t level = MEM32(g_esp + 4), fva = MEM32(g_esp + 8);   /* (level, format, ...) */
+            const char *fmt = fva >= 0x401000u && fva < 0x01400000u ? (const char *)hle_ptr(fva) : NULL;
+            if (fmt) { hle_guest_format(buf, sizeof buf, fmt, g_esp + 12); size_t l = strlen(buf); fprintf(stderr, "[game %u] %s%s", level, buf, l && buf[l - 1] == '\n' ? "" : "\n"); }
+            else fprintf(stderr, "[game %u] (format at %08X)\n", level, fva);
+        }
+    }
+    if (g_listtrace) {
+        if (va == 0x0057F3C0u && g_alloc_seen < 40) {
+            g_alloc_seen++;
+            uint32_t zbits = MEM32(g_esp + 4);
+            float z; memcpy(&z, &zbits, 4);
+            fprintf(stderr, "[list] alloc obj %08X depth %g (0x%08X) code %08X buckets %u table %08X pool %08X\n", g_eax, (double)z, zbits, MEM32(g_esp + 8),
+                    MEM32(g_eax + 0x14), MEM32(g_eax + 0x70), MEM32(0xDA6880));
+        }
+        if (va == 0x0057CCE0u && g_present_seen < 12) {
+            g_present_seen++;
+            uint32_t obj = g_eax, n = MEM32(obj + 0x14), tab = MEM32(obj + 0x70), used = 0, first = 0xFFFFFFFFu;
+            for (uint32_t i = 0; tab && i < n && i < 4096; i++) if (MEM32(tab + 4 * i)) { used++; if (first == 0xFFFFFFFFu) first = i; }
+            fprintf(stderr, "[list] present obj %08X buckets %u table %08X non-empty %u (first %d) flags34 %08X vp %d,%d-%d,%d\n", obj, n, tab, used, (int)first,
+                    MEM32(obj + 0x34), (int)MEM32(obj + 0x20), (int)MEM32(obj + 0x24), (int)MEM32(obj + 0x28), (int)MEM32(obj + 0x2C));
+            if (first != 0xFFFFFFFFu && g_present_seen <= 3) {   /* the entries of the first bucket: code, flags, vertex count, the vertices */
+                uint32_t e = MEM32(tab + 4 * first);
+                for (int k = 0; e && k < 6; k++, e = MEM32(e)) {
+                    uint32_t nv = MEM32(e + 0x18);
+                    fprintf(stderr, "[list]   entry %08X code %08X flags0C %08X nverts %u:", e, MEM32(e + 8), MEM32(e + 0xC), nv);
+                    for (uint32_t v = 0; v < nv && v < 4; v++) {
+                        float x, y, z; uint32_t bx = MEM32(e + 0x2C + 0x20 * v), by = MEM32(e + 0x30 + 0x20 * v), bz = MEM32(e + 0x34 + 0x20 * v);
+                        memcpy(&x, &bx, 4); memcpy(&y, &by, 4); memcpy(&z, &bz, 4);
+                        fprintf(stderr, " (%g, %g, %g)", (double)x, (double)y, (double)z);
+                    }
+                    fprintf(stderr, "\n");
+                }
+            }
+        }
+    }
+    g_enter_trace[g_enter_idx++ & (RECOMP_ENTER_SIZE - 1)] = va;
+    if (g_calltrace_from < 0 || g_calltrace_n >= g_calltrace_max) return;
+    if (!g_trace_t0) g_trace_t0 = hle_ticks_ms();
+    if ((hle_ticks_ms() - g_trace_t0) / 1000.0 < g_calltrace_from) return;
+    g_calltrace_n++;
+    fprintf(stderr, "> %08X\n", va);
+    if (g_calltrace_n == g_calltrace_max) fprintf(stderr, "> (calltrace: %u entries, stopped)\n", g_calltrace_n);
+}
+void recomp_dump_trace(const char *why) { (void)why; }
+#endif
+
 /* ---- the pump ------------------------------------------------------------- */
 static void frame_pump(void) {
     hle_screen_pump();
+    if (g_msgtrace) flags_tick();
 #ifdef __EMSCRIPTEN__
     web_pump();
 #endif
@@ -238,6 +370,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--inputtrace")) g_input_trace = 1;
         else if (!strcmp(argv[i], "--dinput-trace")) g_dinput_trace = 1;
         else if (!strcmp(argv[i], "--mci-trace")) hotd_trace_mci = 1;
+        else if (!strcmp(argv[i], "--msgtrace")) g_msgtrace = 1;
+        else if (!strcmp(argv[i], "--frametrace")) g_frametrace = 1;
+#ifdef RECOMP_TRACE
+        else if (!strcmp(argv[i], "--calltrace-from") && i + 1 < argc) g_calltrace_from = strtod(argv[++i], NULL);
+        else if (!strcmp(argv[i], "--listtrace")) g_listtrace = 1;
+        else if (!strcmp(argv[i], "--calltrace-max") && i + 1 < argc) g_calltrace_max = (unsigned)strtoul(argv[++i], NULL, 0);
+#endif
         else if (!strcmp(argv[i], "--at") && i + 1 < argc) { if (!step_arg(argv[++i])) { fprintf(stderr, "bad --at %s\n", argv[i]); return 1; } }
 #ifdef __EMSCRIPTEN__
         else if (!strcmp(argv[i], "--sample")) { pthread_t t; pthread_create(&t, NULL, sampler, NULL); pthread_detach(t); }
@@ -274,8 +413,8 @@ int main(int argc, char **argv) {
         return 1;
     }
     uint32_t stamp = exe_stamp(exe_host);
-    if (stamp != HOTD_EXE_STAMP) {
-        fprintf(stderr, "%s is not the build this host was lifted from (PE timestamp 0x%08X, wanted 0x%08X).\n", exe_host, stamp, HOTD_EXE_STAMP);
+    if (stamp != hotd_exe_stamp) {
+        fprintf(stderr, "%s is not the build this host was lifted from (PE timestamp 0x%08X, wanted 0x%08X): lift it (run_lift.py) and build again.\n", exe_host, stamp, hotd_exe_stamp);
         return 1;
     }
 #ifndef __EMSCRIPTEN__
@@ -310,7 +449,11 @@ int main(int argc, char **argv) {
     hle_module_add("C:\\THOTD.EXE", img.base, img.resource_rva, img.resource_size, 1);
     int unresolved = recomp_pe_bind(&img, hle_resolve_or_stub);
     printf("  mapped %s: 0x%08X-0x%08X, %d imports not implemented yet\n", exe_host, img.base, img.base + img.span, unresolved);
-    hle_set_command_line("\"C:\\THOTD.EXE\"");
+    /* -cd_nocheck: the game's own switch past its CD check. The EN disc's exe
+     * has no string 4004 (the file the check looks for on the disc), so the
+     * check could never pass on it; the first CD-ROM drive is still recorded
+     * for the music (hotd.c, the CD). */
+    hle_set_command_line("\"C:\\THOTD.EXE\" -cd_nocheck");
     if (!run) {
         printf("\n(dry run: image mapped and bound; --run enters 0x%08X)\n", hotd_entry_va);
         return 0;
@@ -320,7 +463,9 @@ int main(int argc, char **argv) {
     if (g_scale && !hle_screen_scale(g_scale)) fprintf(stderr, "[host] no scaling \"%s\": sharp, smooth, crt, nearest or integer\n", g_scale);
     hle_screen_bars(0);
     if (hle_screen_open(HOTD_TITLE, g_fullscreen > 0, g_headless) != 0) return 1;
+    if (g_msgtrace) hle_proc_hook = msg_hook;
     hle_dinput_mouse_hook = hotd_mouse_motion;
+    hle_winmm_aux_volume_hook = hotd_music_volume;
     hle_screen_frame_hook = on_frame;
     hle_set_pump_hook(frame_pump);
     if (g_watchdog_s) {

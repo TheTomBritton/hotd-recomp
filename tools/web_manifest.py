@@ -15,8 +15,8 @@ redistributables and ripped music (MUSIC/, played by the page) are left out.
 """
 import argparse, json, os, sys
 
-SKIP_DIRS = {'music', 'directx', 'dx', 'install', 'setup', '__macosx'}
-SKIP_EXT = {'.lnk', '.url', '.msi', '.cab', '.hdr', '.inf', '.ini', '.log', '.txt', '.doc', '.htm', '.html', '.pdf', '.wav', '.ogg', '.mp3', '.zip', '.7z', '.rar'}
+SKIP_DIRS = {'music', 'directx', 'dx', 'install', 'redist', 'setup', '__macosx'}
+SKIP_EXT = {'.lnk', '.url', '.msi', '.cab', '.hdr', '.inf', '.ini', '.log', '.txt', '.doc', '.htm', '.html', '.pdf', '.wav', '.ogg', '.m4a', '.mp3', '.zip', '.7z', '.rar', '.ex_', '.id', '.ins', '.lib', '.001'}
 KEEP_NAMES = {'thotd.exe'}
 
 

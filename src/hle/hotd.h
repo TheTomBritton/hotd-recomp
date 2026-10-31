@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 #define HOTD_IMAGE_BASE 0x00400000u
-#define HOTD_EXE_STAMP  0x354411D6u          /* thotd.exe, the 1998 Windows release (run_lift.py MODULES) */
+/* The build the lift is of is hotd_exe_stamp in recomp_dispatch.c (run_lift.py BUILDS). */
 #define HOTD_EXE_NAME   "thotd.exe"
 #define HOTD_CD_LETTER  'E'                  /* the virtual disc: the game folder, without thotd.exe at its root */
 #define HOTD_TITLE      "The House of the Dead"
@@ -31,5 +31,6 @@ void hotd_music_stop(void);
 int  hotd_music_playing(void);                /* 1 while a track plays */
 int  hotd_music_current(void);                /* the track playing, or the last asked */
 int  hotd_music_tracks(void);                 /* number of tracks on the disc (data track included) */
+void hotd_music_volume(uint32_t aux);         /* auxSetVolume: left low word, right high (0xFFFF full) */
 
 #endif

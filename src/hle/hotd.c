@@ -63,11 +63,17 @@ int hotd_opt_gun = 1, hotd_opt_controls = 1, hotd_trace_mci;
 /* ---- the CD drive ---------------------------------------------------------- */
 static void h_GetDriveTypeA(void) {
     const char *r = ASTR(0);
-    if (!r || !*r) RET(3u, 1);                                 /* no root given: the current drive, fixed */
-    if ((r[0] & ~0x20) == HOTD_CD_LETTER) RET(5u, 1);          /* DRIVE_CDROM */
+    static int shown;
+    uint32_t t;
     char path[16], host[1024];
-    snprintf(path, sizeof path, "%c:\\", r[0]);
-    RET(hle_host_path(path, host, sizeof host) && host[0] ? 3u : 1u, 1);   /* DRIVE_FIXED or DRIVE_NO_ROOT_DIR */
+    if (!r || !*r) t = 3u;                                     /* no root given: the current drive, fixed */
+    else if ((r[0] & ~0x20) == HOTD_CD_LETTER) t = 5u;         /* DRIVE_CDROM */
+    else {
+        snprintf(path, sizeof path, "%c:\\", r[0]);
+        t = hle_host_path(path, host, sizeof host) && host[0] ? 3u : 1u;   /* DRIVE_FIXED or DRIVE_NO_ROOT_DIR */
+    }
+    if (shown < 24) { shown++; fprintf(stderr, "[cd] GetDriveTypeA(\"%s\") -> %u\n", r ? r : "(null)", t); }
+    RET(t, 1);
 }
 
 /* ---- gamebios.dll: the light gun (cdecl: the caller pops the arguments) ---- */
@@ -162,6 +168,13 @@ void hotd_music_stop(void) {
 int hotd_music_playing(void) { return g_music_on; }
 int hotd_music_current(void) { return g_music_cur; }
 int hotd_music_tracks(void) { return g_tracks; }
+void hotd_music_volume(uint32_t aux) {
+    unsigned l = aux & 0xFFFFu, r = aux >> 16, v = (l > r ? l : r) * 100u / 65535u;
+    fprintf(stderr, "[cd] volume %u%%\n", v);
+#ifdef __EMSCRIPTEN__
+    page_music(2, (int)v, 0);
+#endif
+}
 void hotd_music_set_tracks(int n) { if (n > 1) g_tracks = n; }
 
 /* The answers MCI gives in TMSF: "tt:mm:ss:ff", bytes little-endian as the
@@ -241,7 +254,25 @@ static void h_mciSendStringA(void) {                           /* (lpszCommand, 
 }
 static void h_mciGetErrorStringA(void) { RET(0, 3); }
 
+/* ---- message boxes: printed, and answered so the game goes on or quits
+ * rather than asking again (the CD box retries forever on OK) ------------ */
+static void h_MessageBoxA(void) {                              /* (hwnd, text, caption, type) */
+    const char *text = ASTR(1), *caption = ASTR(2);
+    uint32_t buttons = A32(3) & 0xFu, answer;
+    switch (buttons) {
+    case 0: answer = 1; break;                                 /* MB_OK: IDOK */
+    case 1: answer = 2; break;                                 /* MB_OKCANCEL: IDCANCEL */
+    case 2: answer = 3; break;                                 /* MB_ABORTRETRYIGNORE: IDABORT */
+    case 3: answer = 2; break;                                 /* MB_YESNOCANCEL: IDCANCEL */
+    case 4: answer = 7; break;                                 /* MB_YESNO: IDNO */
+    default: answer = 2; break;                                /* MB_RETRYCANCEL: IDCANCEL */
+    }
+    fprintf(stderr, "[messagebox] %s: %s -> %u\n", caption ? caption : "", text ? text : "", answer);
+    RET(answer, 4);
+}
+
 static const win32hle_shim g_hotd_shims[] = {
+    { "MessageBoxA",           h_MessageBoxA },
     { "GetDriveTypeA",         h_GetDriveTypeA },
     { "gbInitDeviceDriver",    gb_InitDeviceDriver },
     { "gblSetScreenMode",      gb_SetScreenMode },

@@ -33,67 +33,109 @@ from pe_analyze import analyze_pe, build_iat_map           # noqa: E402
 OUT = os.path.join(_HERE, 'src', 'recomp', 'gen')
 STATS = os.path.join(_HERE, 'work', 'lift_stats.json')
 
-# (file, catalog, PE timestamp of the one build supported, what it is).
-# A different build lifts, but the patches and seeds are at this build's
-# addresses: it would crash in the game, so it is refused (README).
-MODULES = [
-    (os.path.join(_HERE, 'work', 'thotd.exe'), os.path.join(_HERE, 'work', 'functions.json'),
-     0x354411D6, 'thotd.exe, the 1998 Windows release (1998-04-27)'),
-]
+# The builds this driver knows, by the PE timestamp of thotd.exe. A build
+# lifts like any other, but the patches, the seeds and the data-in-code range
+# are addresses in one binary: a build not here is refused rather than
+# lifted against another's addresses (it would crash in the game).
+#
+#   0x354411D6  the 1998-04-27 US release (the first lifted; the Windows host's online play is for it)
+#   0x3564D180  the 1998-05-22 European release ("The House of the Dead" EN disc). Its code runs
+#               0x50 bytes earlier from the Watcom library on (setjmp 0x005796F4 against
+#               0x00579744), the game's own code before it is laid out the same.
+BUILDS = {
+    0x354411D6: {
+        'what': 'thotd.exe, the 1998 Windows release (1998-04-27)',
+        # Entries the catalogs do not find, so a clean checkout lifts them too.
+        # Each was an "ICALL: unresolved VA" in a run (tools/seed_from_log.py): reached
+        # only through a pointer the catalog doesn't see. Without 0x0057DC20 the game
+        # takes another path at boot and quits.
+        'seeds': [
+            0x00418C94, 0x0041DCCC,              # window-message handlers
+            0x0045AF50, 0x0046EA58, 0x00480654, 0x0048793C,   # scheduler tasks
+            0x0057DC20,                          # a library routine the boot calls through a table
+            # Callbacks Windows calls (a window procedure set with SetWindowLongA):
+            # before pcrecomp#128 these ran as the original machine code unnoticed.
+            0x00567720,
+        ],
+        # Data Watcom linked into BEGTEXT after the last function (ret at 0x00595A2B):
+        # 256 16-byte records from 0x00595A30, then a header that points back at them;
+        # the import thunks (jmp [IAT]) start at 0x00596AD8.
+        # Their `js` bytes chain each record into the next, so catalogued entries in
+        # it lift as ~200 overlapping 8,800-line bodies. Nothing here is code.
+        'data_in_code': [(0x00595A2C, 0x00596AD8)],
+        # Watcom's setjmp. Each call to it gets a landing pad: a label just after the
+        # call, which the host's longjmp resumes at. recomp_dispatch.c lists them as
+        # hotd_setjmp_resume[] (function VA, resume VA).
+        'setjmp': 0x00579744,
+        # Watcom's longjmp: its first instruction (PATCHES below).
+        'longjmp': 0x00579783,
+        # Online play (host.c, docs/multiplayer.md). The input poller runs once a
+        # frame: the lockstep's gate is its first instruction. Player 2's mouse is a
+        # block of its own, swapped in for player 2's reader (sub_0043591C, ebx the
+        # player's record) and start check.
+        'net_patches': {
+            0x00578100: 'hotd_net_gate();',
+            0x00436676: 'hotd_p2_in(ebx);',
+            0x00436678: 'hotd_p2_out();',
+            0x00419147: 'hotd_p2_in(0x00D9F124u);',
+            0x0041914C: 'hotd_p2_out();',
+        },
+    },
+    0x3564D180: {
+        'what': 'thotd.exe, the 1998 European release (1998-05-22)',
+        'seeds': [],                             # harvested from runs (work/run_seeds.json)
+        'data_in_code': [(0x005959DC, 0x00596A88)],
+        'setjmp': 0x005796F4,
+        'longjmp': 0x00579733,
+        'net_patches': {},                       # not found in this build yet: the Windows host's online play needs them
+    },
+}
 
-# Entries the catalogs do not find, so a clean checkout lifts them too.
-# Each was an "ICALL: unresolved VA" in a run (tools/seed_from_log.py): reached
-# only through a pointer the catalog doesn't see. Without 0x0057DC20 the game
-# takes another path at boot and quits.
-RUN_SEEDS = [
-    0x00418C94, 0x0041DCCC,              # window-message handlers
-    0x0045AF50, 0x0046EA58, 0x00480654, 0x0048793C,   # scheduler tasks
-    0x0057DC20,                          # a library routine the boot calls through a table
-    # Callbacks Windows calls (a window procedure set with SetWindowLongA):
-    # before pcrecomp#128 these ran as the original machine code unnoticed.
-    0x00567720,
-]
+EXE = os.path.join(_HERE, 'work', 'thotd.exe')
+CATALOG = os.path.join(_HERE, 'work', 'functions.json')
 
-# Data Watcom linked into BEGTEXT after the last function (ret at 0x00595A2B):
-# 256 16-byte records from 0x00595A30, then a header that points back at them;
-# the import thunks (jmp [IAT]) start at 0x00596AD8.
-# Their `js` bytes chain each record into the next, so catalogued entries in
-# it lift as ~200 overlapping 8,800-line bodies. Nothing here is code.
-DATA_IN_CODE = [(0x00595A2C, 0x00596AD8)]
 
+def exe_stamp(path):
+    """The PE header's TimeDateStamp: which build of a module this is."""
+    with open(path, 'rb') as f:
+        head = f.read(4096)
+    nt = int.from_bytes(head[0x3C:0x40], 'little')
+    return int.from_bytes(head[nt + 8:nt + 12], 'little')
+
+
+def build_of(path):
+    """The BUILDS entry for this thotd.exe, or None."""
+    return BUILDS.get(exe_stamp(path))
+
+
+# Set by main() for the build being lifted.
+BUILD = None
+MODULES = []
+RUN_SEEDS = []
+DATA_IN_CODE = []
+PATCHES = {}
+SETJMP = 0
 
 def is_data(va):
     return any(lo <= va < hi for lo, hi in DATA_IN_CODE)
 
 # Fixes to the game itself: C run after the instruction at the address. The
 # lift stays faithful; a patch is for what the original cannot do on a modern
-# machine. Each calls a host function (src/runtime/host.c) declared in
-# recomp_funcs.h.
-PATCHES = {
-    # Watcom's longjmp. Its body is inlined into every task that jumps to it,
-    # and it would restore esp and "return" to the address setjmp saved, which
-    # a lifted call never pushes. The host does it instead: guest registers
-    # from the jmp_buf, then back into the frame that called setjmp
-    # (hotd_longjmp in host.c, recomp_eh_resume in pcrecomp's eh32.c).
-    0x00579783: 'RECOMP_REGS_OUT(); hotd_longjmp();',
-    # Online play (host.c, docs/multiplayer.md). The input poller runs once a
-    # frame: the lockstep's gate is its first instruction.
-    0x00578100: 'hotd_net_gate();',
-    # Player 2's mouse is a block of its own, swapped in for player 2's
-    # reader (sub_0043591C, ebx the player's record) and start check.
-    0x00436676: 'hotd_p2_in(ebx);',
-    0x00436678: 'hotd_p2_out();',
-    0x00419147: 'hotd_p2_in(0x00D9F124u);',
-    0x0041914C: 'hotd_p2_out();',
-}
+# machine. Each calls a host function (src/runtime/host.c, src/hle/main.c)
+# declared in recomp_funcs.h.
+#   Watcom's longjmp. Its body is inlined into every task that jumps to it,
+#   and it would restore esp and "return" to the address setjmp saved, which
+#   a lifted call never pushes. The host does it instead: guest registers
+#   from the jmp_buf, then back into the frame that called setjmp
+#   (hotd_longjmp in host.c, recomp_eh_resume in pcrecomp's eh32.c).
+def patches_of(build):
+    p = {build['longjmp']: 'RECOMP_REGS_OUT(); hotd_longjmp();'}
+    p.update(build['net_patches'])
+    return p
+
+
 PATCH_DECLS = ('void hotd_longjmp(void);\nvoid hotd_net_gate(void);\n'
                'void hotd_p2_in(uint32_t record);\nvoid hotd_p2_out(void);\n')
-
-# Watcom's setjmp. Each call to it gets a landing pad: a label just after the
-# call, which the host's longjmp resumes at. recomp_dispatch.c lists them as
-# hotd_setjmp_resume[] (function VA, resume VA).
-SETJMP = 0x00579744
-
 
 def apply_patches(body, patches):
     """Add each patch's C after the lines that lift its instruction.
@@ -122,12 +164,7 @@ def load_seeds(path):
     return {e['address'] if isinstance(e, dict) else e for e in json.load(open(path))}
 
 
-def exe_stamp(path):
-    """The PE header's TimeDateStamp: which build of a module this is."""
-    with open(path, 'rb') as f:
-        head = f.read(4096)
-    nt = int.from_bytes(head[0x3C:0x40], 'little')
-    return int.from_bytes(head[nt + 8:nt + 12], 'little')
+
 
 
 class Out:
@@ -252,14 +289,21 @@ def main():
     ap.add_argument('--seeds', default=os.path.join(_HERE, 'work', 'run_seeds.json'),
                     help='seed_from_log.py JSON of unresolved targets from runs')
     args = ap.parse_args()
-    for path, catalog, stamp, what in MODULES:
-        if not os.path.exists(path):
-            sys.exit('no %s -- README, Step by step' % path)
-        if not os.path.exists(catalog):
-            sys.exit('no catalog at %s -- run disasm32.py first (README, Step by step)' % catalog)
-        if exe_stamp(path) != stamp:
-            sys.exit('%s is not the build this project supports: its PE timestamp is 0x%08X, '
-                     'expected 0x%08X: %s (README).' % (path, exe_stamp(path), stamp, what))
+    global BUILD, MODULES, RUN_SEEDS, DATA_IN_CODE, PATCHES, SETJMP
+    if not os.path.exists(EXE):
+        sys.exit('no %s -- README, Step by step' % EXE)
+    if not os.path.exists(CATALOG):
+        sys.exit('no catalog at %s -- run disasm32.py first (README, Step by step)' % CATALOG)
+    BUILD = build_of(EXE)
+    if not BUILD:
+        sys.exit('%s is not a build this project knows: its PE timestamp is 0x%08X, expected one of %s (README).'
+                 % (EXE, exe_stamp(EXE), ', '.join('0x%08X' % k for k in BUILDS)))
+    MODULES = [(EXE, CATALOG, exe_stamp(EXE), BUILD['what'])]
+    RUN_SEEDS = list(BUILD['seeds'])
+    DATA_IN_CODE = list(BUILD['data_in_code'])
+    PATCHES = patches_of(BUILD)
+    SETJMP = BUILD['setjmp']
+    print('[*] build: %s' % BUILD['what'])
 
     os.makedirs(args.out, exist_ok=True)
     for fn in os.listdir(args.out):                 # a smaller lift must not leave stale chunks
@@ -291,7 +335,8 @@ def main():
             f.write('    { 0x%08Xu, %s },\n' % (a, n))
         f.write('};\nconst uint32_t recomp_dispatch_count = %d;\n'
                 'const uint32_t hotd_entry_va = 0x%08Xu;\n'
-                % (len(out.entries), entries_va[0]))
+                'const uint32_t hotd_exe_stamp = 0x%08Xu;   /* the build this lift is of: the host checks the exe it maps */\n'
+                % (len(out.entries), entries_va[0], exe_stamp(EXE)))
         f.write('const uint32_t hotd_setjmp_resume[][2] = {\n%s    { 0, 0 }\n};\n'
                 % ''.join('    { 0x%08Xu, 0x%08Xu },\n' % e for e in out.setjmp))
 

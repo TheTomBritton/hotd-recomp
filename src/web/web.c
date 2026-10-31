@@ -1,9 +1,9 @@
 /*
  * web.c - what the browser build needs before the game starts: its files.
  *
- * The game folder is served beside the page, under game/, with a
- * game/manifest.json naming every file in it (tools/web_manifest.py writes
- * it). WASMFS's fetch backend reads each file from the server a piece at a
+ * The game folder is served beside the engine's script, under data/, with
+ * a data/manifest.json naming every file in it (tools/web_manifest.py
+ * writes it). WASMFS's fetch backend reads each file from the server a piece at a
  * time as the game opens it, so nothing is downloaded that is not played
  * and the game starts at once; the names come from the manifest, since a
  * web server cannot list a directory, and win32hle's path layer matches
@@ -38,7 +38,7 @@
 #define FETCH_CHUNK (1u << 20)
 
 EM_JS(char *, web_base_url, (void), {
-    // The worker's script lives beside the page: its folder is the site's game folder's parent.
+    // The worker's script (hotd1.js) and the game folder (data/) share a directory.
     var u = new URL('./', self.location.href);
     return stringToNewUTF8(u.href);
 });
@@ -111,24 +111,24 @@ int web_mount(const char *exe_name, char *game_dir, size_t gn, char *save_dir, s
     char url[1024];
 
     /* the game folder, from beside the page */
-    snprintf(url, sizeof url, "%sgame", base);
+    snprintf(url, sizeof url, "%sdata", base);
     backend_t fb = wasmfs_create_fetch_backend(url, FETCH_CHUNK);
     if (!fb || wasmfs_create_directory("/game", 0777, fb) != 0) {
         fprintf(stderr, "[web] no fetch backend for %s\n", url);
         free(base);
         return 0;
     }
-    snprintf(url, sizeof url, "%sgame/manifest.json", base);
+    snprintf(url, sizeof url, "%sdata/manifest.json", base);
     char *manifest = web_fetch_text(url);
     if (!manifest) {
         fprintf(stderr, "[web] no %s\n", url);
-        web_set_status("No game files on this site (game/manifest.json).");
+        web_set_status("No game files on this site (data/manifest.json).");
         free(base);
         return 0;
     }
     int n = build_tree(manifest, fb, "/game");
     free(manifest);
-    fprintf(stderr, "[web] game folder: %d files from %sgame/\n", n, base);
+    fprintf(stderr, "[web] game folder: %d files from %sdata/\n", n, base);
 
     /* the browser's own storage for what the game writes */
     backend_t opfs = wasmfs_create_opfs_backend();
