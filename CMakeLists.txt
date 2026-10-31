@@ -48,7 +48,7 @@ if(EMSCRIPTEN)
   set(WEB_ASSERTIONS 0 CACHE STRING "Emscripten runtime assertions (1: readable aborts, slower)")
   target_link_options(hotd PRIVATE ${WEB_LINK_OPT} -g0 --profiling-funcs -pthread --use-port=sdl2 --use-port=sdl2_ttf
     -sPROXY_TO_PTHREAD -sPTHREAD_POOL_SIZE=8
-    -sWASMFS -lfetchfs.js -lopfs.js
+    -sWASMFS -lfetchfs.js -lopfs.js --js-library ${CMAKE_SOURCE_DIR}/src/web/wasmfs_fetch.js
     -sOFFSCREEN_FRAMEBUFFER
     -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2
     -sGLOBAL_BASE=24MB
