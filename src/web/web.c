@@ -87,7 +87,7 @@ static int build_tree(const char *json, backend_t be, const char *root) {
                 char path[PATH_MAX];
                 snprintf(path, sizeof path, "%s/%s", root, name);
                 make_dirs(path, be);
-                if (wasmfs_create_file(path, 0666, be) == 0) n++;
+                if (wasmfs_create_file(path, 0666, be) >= 0) n++;   /* a descriptor, or -1 */
             }
         }
         p = e + 1;
@@ -105,10 +105,30 @@ static int has_file(const char *dir, const char *name) {
     return found;
 }
 
+/* The fonts a Windows face is drawn with (gdidc.c looks here): the game's
+ * Options dialogs are Win32 dialogs, their text drawn through GDI. */
+static const char *const k_fonts[] = {
+    "LiberationSans-Regular.ttf", "LiberationSans-Bold.ttf", "LiberationSans-Italic.ttf", "LiberationSans-BoldItalic.ttf",
+    "LiberationSerif-Regular.ttf", "LiberationSerif-Bold.ttf", "LiberationSerif-Italic.ttf", "LiberationSerif-BoldItalic.ttf",
+    "LiberationMono-Regular.ttf", "LiberationMono-Bold.ttf", "LiberationMono-Italic.ttf", "LiberationMono-BoldItalic.ttf" };
+
 int web_mount(const char *exe_name, char *game_dir, size_t gn, char *save_dir, size_t sn) {
     char *base = web_base_url();
     if (!base) return 0;
     char url[1024];
+
+    /* the fonts, from beside the engine (fonts/) */
+    snprintf(url, sizeof url, "%sfonts", base);
+    backend_t fontfb = wasmfs_create_fetch_backend(url, FETCH_CHUNK);
+    if (fontfb) {
+        mkdir("/usr", 0777); mkdir("/usr/share", 0777); mkdir("/usr/share/fonts", 0777); mkdir("/usr/share/fonts/truetype", 0777);
+        if (wasmfs_create_directory("/usr/share/fonts/truetype/liberation", 0777, fontfb) == 0)
+            for (size_t i = 0; i < sizeof k_fonts / sizeof *k_fonts; i++) {
+                char path[256];
+                snprintf(path, sizeof path, "/usr/share/fonts/truetype/liberation/%s", k_fonts[i]);
+                wasmfs_create_file(path, 0666, fontfb);
+            }
+    }
 
     /* the game folder, from beside the page */
     snprintf(url, sizeof url, "%sdata", base);

@@ -124,7 +124,12 @@ static void *sampler(void *arg) {
     (void)arg;
     for (;;) {
         sleep(5);
-        fprintf(stderr, "[sample] in sub_%08X, esp %08X\n", g_cur_func, g_esp);
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+        uint32_t tgt = (uint32_t)(ts.tv_sec * 1000u + ts.tv_nsec / 1000000u);
+        extern volatile unsigned hle_dbg_yields, hle_dbg_handed, hle_dbg_timeouts, hle_dbg_takes;
+        int hle_debug_waiters(void);
+        fprintf(stderr, "[sample] in sub_%08X, esp %08X; timeGetTime %u, game's last tick %u (now %u); lock waiters %d, yields %u handed %u timeouts %u takes %u\n",
+                g_cur_func, g_esp, tgt, MEM32(0xD5A998), MEM32(0xD5A994), hle_debug_waiters(), hle_dbg_yields, hle_dbg_handed, hle_dbg_timeouts, hle_dbg_takes);
     }
     return NULL;
 }
@@ -166,8 +171,10 @@ static void on_frame(const uint8_t *px, int w, int h, int pitch, int bpp) {
             if (pal) for (int i = 0; i < 256; i++) if (pal[i] & 0xFFFFFF) npal++;
             int top = 0; for (int i = 1; i < 256; i++) if (hist[i] > hist[top]) top = i;
             unsigned distinct = 0; for (int i = 0; i < 256; i++) if (hist[i]) distinct++;
-            fprintf(stderr, "[frame] seq %u %dx%dx%d: %u distinct indices, most %u (%u), palette %s (%u non-black)\n",
+            fprintf(stderr, "[frame] seq %u %dx%dx%d: %u distinct indices, most %u (%u), palette %s (%u non-black)",
                     seq, fw, fh, fbpp, distinct, top, hist[top], pal ? "set" : "none", npal);
+            if (pal) { fprintf(stderr, " entries:"); for (int i = 0; i < 256; i += 32) fprintf(stderr, " %d=%06X", i, pal[i] & 0xFFFFFF); fprintf(stderr, " 255=%06X", pal[255] & 0xFFFFFF); }
+            fprintf(stderr, "\n");
         }
     }
     (void)px; (void)pitch; (void)bpp;

@@ -140,6 +140,11 @@ void hotd_mouse_motion(int x, int y, int *dx, int *dy) {
 /* ---- CD audio over MCI ------------------------------------------------------ */
 static int g_music_first, g_music_last, g_music_on, g_music_cur = 2;
 static int g_tracks = 12;                                      /* the disc: a data track and the music */
+/* The disc's track lengths in seconds (HOTD.cue: a data track, then eleven
+ * audio tracks), so the game's timing of a track matches the file the page
+ * plays. Unknown tracks are given three minutes. */
+static const double k_track_len[13] = { 0, 0, 79.9, 320.7, 291.0, 24.6, 294.3, 22.8, 102.3, 293.0, 291.6, 136.5, 292.1 };
+static double track_len(int t) { return t >= 2 && t <= 12 && k_track_len[t] > 0 ? k_track_len[t] : 180.0; }
 static uint32_t g_music_t0;
 
 #ifdef __EMSCRIPTEN__
@@ -232,7 +237,8 @@ static uint32_t mci(const char *cmd, char *ret, uint32_t n) {
             uint32_t ms = g_music_on ? hle_ticks_ms() - g_music_t0 : 0, s = ms / 1000;
             snprintf(ret, n, "%02d:%02u:%02u:%02u", g_music_cur, (s / 60) % 100, s % 60, (ms % 1000) * 75 / 1000);
         }
-        else if (!strncasecmp(what, "length", 6)) snprintf(ret, n, "03:00:00");
+        else if (!strncasecmp(what, "length track", 12)) { double l = track_len(atoi(what + 12)); int sec = (int)l; snprintf(ret, n, "%02d:%02d:%02d", sec / 60, sec % 60, (int)((l - sec) * 75)); }
+        else if (!strncasecmp(what, "length", 6)) { double l = 0; for (int t = 1; t <= g_tracks; t++) l += track_len(t); int sec = (int)l; snprintf(ret, n, "%02d:%02d:%02d", sec / 60, sec % 60, 0); }
         else if (!strncasecmp(what, "position track", 14)) snprintf(ret, n, "%02d:00:00:00", atoi(what + 14));
         else if (!strncasecmp(what, "type track", 10)) snprintf(ret, n, atoi(what + 10) == 1 ? "other" : "audio");
         else snprintf(ret, n, "0");
