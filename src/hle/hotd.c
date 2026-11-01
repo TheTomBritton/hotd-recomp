@@ -289,3 +289,27 @@ static const win32hle_shim g_hotd_shims[] = {
     { 0, 0 } };
 
 void hotd_register_shims(void) { win32hle_register(g_hotd_shims); }
+
+
+/* ---- the Direct3D driver-select dialog, answered ----
+ * Started with -d3d and no saved choice (devs.cfg), the game puts up
+ * "Select Direct3D Devices": DirectDraw device, Direct3D device, video mode,
+ * and the Direct3D settings. The layer offers one of each, so the dialog is
+ * answered as it opens: bilinear filtering on, everything else as the game
+ * set it, then OK. The game writes devs.cfg with the choice. */
+#define HOTD_IDC_BILINEAR 51007u
+#define HOTD_IDC_FULLSCREEN 51002u
+void hotd_dialog(uint32_t hwnd, uint32_t resource_id) {
+    if (resource_id < 0x10000u) return;                  /* a numbered dialog: not this one */
+    const char *name = (const char *)hle_ptr(resource_id);
+    if (!name || strcmp(name, "D3DDRIVERSELECT") != 0) return;
+    uint32_t bl = hle_dialog_item(hwnd, HOTD_IDC_BILINEAR), fs = hle_dialog_item(hwnd, HOTD_IDC_FULLSCREEN);
+    if (bl) hle_send(bl, 0x00F1u /* BM_SETCHECK */, 1, 0);
+    if (fs) hle_send(fs, 0x00F1u, 1, 0);
+    fprintf(stderr, "[hotd] Direct3D setup: DirectDraw device %d, Direct3D device %d, video mode %d, bilinear %u, fullscreen %u -> OK\n",
+            (int)hle_send(hle_dialog_item(hwnd, 51001u), 0x0147u /* CB_GETCURSEL */, 0, 0),
+            (int)hle_send(hle_dialog_item(hwnd, 51000u), 0x0147u, 0, 0),
+            (int)hle_send(hle_dialog_item(hwnd, 51005u), 0x0147u, 0, 0),
+            bl ? hle_send(bl, 0x00F0u, 0, 0) : 0u, fs ? hle_send(fs, 0x00F0u, 0, 0) : 0u);
+    hle_send(hwnd, 0x0111u /* WM_COMMAND */, 1u /* IDOK, BN_CLICKED */, hle_dialog_item(hwnd, 1u));
+}

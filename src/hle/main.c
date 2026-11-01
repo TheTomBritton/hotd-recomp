@@ -44,6 +44,7 @@ extern int win32hle_trace;
 extern int hle_filetrace_on;
 extern int g_input_trace;
 
+static const char *g_guest_args;                       /* --guest-args: switches appended to the game's command line */
 static int g_headless, g_fullscreen = -1;
 static const char *g_scale;
 static unsigned g_watchdog_s;
@@ -363,6 +364,7 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--run")) run = 1;
+        else if (!strcmp(argv[i], "--guest-args") && i + 1 < argc) g_guest_args = argv[++i];
         else if (!strcmp(argv[i], "--headless")) g_headless = 1;
         else if (!strcmp(argv[i], "--fullscreen")) g_fullscreen = 1;
         else if (!strcmp(argv[i], "--window")) g_fullscreen = 0;
@@ -460,7 +462,14 @@ int main(int argc, char **argv) {
      * has no string 4004 (the file the check looks for on the disc), so the
      * check could never pass on it; the first CD-ROM drive is still recorded
      * for the music (hotd.c, the CD). */
-    hle_set_command_line("\"C:\\THOTD.EXE\" -cd_nocheck");
+    {
+        /* -d3d / -ddraw pick the game's Direct3D or its 256-colour software
+           renderer (the installer's shortcuts pass one or the other); the
+           host's --guest-args adds any switches after -cd_nocheck. */
+        static char cmd[512];
+        snprintf(cmd, sizeof cmd, "\"C:\\THOTD.EXE\" -cd_nocheck%s%s", g_guest_args ? " " : "", g_guest_args ? g_guest_args : "");
+        hle_set_command_line(cmd);
+    }
     if (!run) {
         printf("\n(dry run: image mapped and bound; --run enters 0x%08X)\n", hotd_entry_va);
         return 0;
@@ -472,6 +481,7 @@ int main(int argc, char **argv) {
     if (hle_screen_open(HOTD_TITLE, g_fullscreen > 0, g_headless) != 0) return 1;
     if (g_msgtrace) hle_proc_hook = msg_hook;
     hle_dinput_mouse_hook = hotd_mouse_motion;
+    hle_dialog_hook = hotd_dialog;
     hle_winmm_aux_volume_hook = hotd_music_volume;
     hle_screen_frame_hook = on_frame;
     hle_set_pump_hook(frame_pump);

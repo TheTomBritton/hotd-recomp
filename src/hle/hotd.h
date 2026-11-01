@@ -33,4 +33,6 @@ int  hotd_music_current(void);                /* the track playing, or the last 
 int  hotd_music_tracks(void);                 /* number of tracks on the disc (data track included) */
 void hotd_music_volume(uint32_t aux);         /* auxSetVolume: left low word, right high (0xFFFF full) */
 
+void hotd_dialog(uint32_t hwnd, uint32_t resource_id);   /* answers the Direct3D driver-select dialog */
+
 #endif
